@@ -1,5 +1,7 @@
 @Library('jenkins-pipeline-shared-libraries')_
 
+def deployProperties = [:]
+
 pipeline {
     agent {
         label 'kie-rhel7 && kie-mem16g'
@@ -7,9 +9,16 @@ pipeline {
     parameters {
         string(name: 'DISPLAY_NAME', defaultValue: '', description: 'Setup a specific build display name')
         string(name: 'BUILD_BRANCH_NAME', defaultValue: 'master', description: 'Which branch to build ? Set if you are not on a multibranch pipeline.')
+        booleanParam(name: 'RELEASE', defaultValue: false, description: 'Is this build for a release?')
+        string(name: 'MAVEN_VERSION', defaultValue: '3.6.2', description: 'Only used if RELEASE.')
     }
     environment {
         MAVEN_OPTS = '-Xms1024m -Xmx4g'
+        NEW_BRANCH = "${JOB_BASE_NAME}-${BUILD_NUMBER}"
+        GIT_USER = "Jenkins CI"
+        GIT_USER_EMAIL = "jenkins@rhba-jenkins.rhev-ci-vms.eng.rdu2.redhat.com"
+        COMMIT_MSG = "Update Maven version for release"
+        PROPERTIES_FILE = "deployment.properties"
     }
     tools {
         maven 'kie-maven-3.6.2'
@@ -34,9 +43,53 @@ pipeline {
                 }
             }
         }
+        stage('Clone repositories') { 
+            steps {
+                dir("kogito-runtimes") {
+                    checkout(githubscm.resolveRepository("kogito-runtimes", "kiegroup", env.BRANCH_NAME, false))
+                }
+                dir("kogito-apps") {
+                    checkout(githubscm.resolveRepository("kogito-apps", "kiegroup", env.BRANCH_NAME, false))
+                }
+                dir("kogito-examples") {
+                    checkout(githubscm.resolveRepository("kogito-examples", "kiegroup", env.BRANCH_NAME, false))
+                }
+                // Use a separate dir for persistence to not overwrite the test results
+                sh "cp -r kogito-examples kogito-examples-persistence"
+            }
+        }
+        stage('Prepare Maven settings'){
+            when {
+                expression { return params.RELEASE }
+            }
+            steps {
+                configFileProvider([configFile(fileId: '771ff52a-a8b4-40e6-9b22-d54c7314aa1e', targetLocation: 'maven-settings.xml', variable: 'MAVEN_SETTINGS_FILE')]){
+                    sh "echo '-B -s ${MAVEN_SETTINGS_FILE}' | tee kogito-{runtimes,apps,examples,examples-persistence}/.mvn/maven.config"
+                }
+                dir("kogito-runtimes") {
+                    script {
+                        maven.updateMavenVersion(params.MAVEN_VERSION)
+                    }
+                }
+                dir("kogito-apps") {
+                    script {
+                        maven.updateMavenVersion(params.MAVEN_VERSION)
+                    }
+                }
+                dir("kogito-examples") {
+                    script {
+                        maven.updateMavenVersion(params.MAVEN_VERSION)
+                    }
+                }
+                dir("kogito-examples-persistence") {
+                    script {
+                        maven.updateMavenVersion(params.MAVEN_VERSION)
+                    }
+                }
+            }
+        }
         stage('Build kogito-runtimes') {
             steps {
-                checkout([$class: 'GitSCM', branches: [[name: env.BRANCH_NAME]], browser: [$class: 'GithubWeb', repoUrl: 'git@github.com:kiegroup/kogito-runtimes.git'], doGenerateSubmoduleConfigurations: false, extensions: [[$class: 'RelativeTargetDirectory', relativeTargetDir: 'kogito-runtimes']], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'kie-ci-user-key', url: 'git@github.com:kiegroup/kogito-runtimes.git']]])
                 dir("kogito-runtimes") {
                     script {
                         maven.runMavenWithSubmarineSettings('clean install', false)
@@ -51,7 +104,6 @@ pipeline {
         }
         stage('Build kogito-apps') {
             steps {
-                checkout([$class: 'GitSCM', branches: [[name: env.BRANCH_NAME]], browser: [$class: 'GithubWeb', repoUrl: 'git@github.com:kiegroup/kogito-apps.git'], doGenerateSubmoduleConfigurations: false, extensions: [[$class: 'RelativeTargetDirectory', relativeTargetDir: 'kogito-apps']], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'kie-ci-user-key', url: 'git@github.com:kiegroup/kogito-apps.git']]])
                 dir("kogito-apps") {
                     script {
                         maven.runMavenWithSubmarineSettings('clean install', false)
@@ -66,7 +118,6 @@ pipeline {
         }
         stage('Build kogito-examples') {
             steps {
-                checkout([$class: 'GitSCM', branches: [[name: env.BRANCH_NAME]], browser: [$class: 'GithubWeb', repoUrl: 'git@github.com:kiegroup/kogito-examples.git'], doGenerateSubmoduleConfigurations: false, extensions: [[$class: 'RelativeTargetDirectory', relativeTargetDir: 'kogito-examples']], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'kie-ci-user-key', url: 'git@github.com:kiegroup/kogito-examples.git']]])
                 dir("kogito-examples") {
                     script {
                         maven.runMavenWithSubmarineSettings('clean install', false)
@@ -81,8 +132,6 @@ pipeline {
         }
         stage('Build kogito-examples with persistence') {
             steps {
-                // Use a separate dir for persistence to not overwrite the test results
-                checkout([$class: 'GitSCM', branches: [[name: env.BRANCH_NAME]], browser: [$class: 'GithubWeb', repoUrl: 'git@github.com:kiegroup/kogito-examples.git'], doGenerateSubmoduleConfigurations: false, extensions: [[$class: 'RelativeTargetDirectory', relativeTargetDir: 'kogito-examples-persistence']], submoduleCfg: [], userRemoteConfigs: [[credentialsId: 'kie-ci-user-key', url: 'git@github.com:kiegroup/kogito-examples.git']]])
                 dir("kogito-examples-persistence") {
                     script {
                         // Don't run with tests so far, see: https://github.com/quarkusio/quarkus/issues/6885
@@ -96,26 +145,49 @@ pipeline {
                 }
             }
         }
-        stage('Deploy kogito-runtimes') {
+        stage('Create PR'){
+            when {
+                expression { return params.RELEASE }
+            }
+            steps {
+                dir("kogito-runtimes") {
+                    script {
+                        githubscm.createBranch(NEW_BRANCH)
+                        githubscm.commitChanges(GIT_USER, GIT_USER_EMAIL, COMMIT_MSG, "pom.xml")
+                        githubscm.pushObject("origin", NEW_BRANCH)
+                        deployProperties["kogito-runtimes.pr"] = githubscm.createPR(COMMIT_MSG, "master")
+                    }
+                }
+                dir("kogito-apps") {
+                    script {
+                        githubscm.createBranch(NEW_BRANCH)
+                        githubscm.commitChanges(GIT_USER, GIT_USER_EMAIL, COMMIT_MSG, "pom.xml")
+                        githubscm.pushObject("origin", NEW_BRANCH)
+                        deployProperties["kogito-apps.pr"] = githubscm.createPR(COMMIT_MSG, "master")
+                    }
+                }
+                dir("kogito-examples") {
+                    script {
+                        githubscm.createBranch(NEW_BRANCH)
+                        githubscm.commitChanges(GIT_USER, GIT_USER_EMAIL, COMMIT_MSG, "pom.xml")
+                        githubscm.pushObject("origin", NEW_BRANCH)
+                        deployProperties["kogito-examples.pr"] = githubscm.createPR(COMMIT_MSG, "master")
+                    }
+                }
+            }
+        }
+        stage('Deploy artifacts') {
             steps {
                 dir("kogito-runtimes") {
                     script {
                         maven.runMavenWithSubmarineSettings('clean deploy', true)
                     }
                 }
-            }
-        }
-        stage('Deploy kogito-apps') {
-            steps {
                 dir("kogito-apps") {
                     script {
                         maven.runMavenWithSubmarineSettings('clean deploy', true)
                     }
                 }
-            }
-        }
-        stage('Deploy kogito-examples') {
-            steps {
                 dir("kogito-examples") {
                     script {
                         maven.runMavenWithSubmarineSettings('clean deploy', true)
@@ -123,9 +195,29 @@ pipeline {
                 }
             }
         }
+        stage('Archive staging repository URL') {
+            when {
+                expression { return params.RELEASE }
+            }
+            steps {
+                script {
+                    deployProperties["staging-repo.url"] = input(message: "Enter staging repository URL:", parameters: [string(name: 'STAGING_REPO_URL')])
+                }
+            }
+        }
     }
     post {
         always {
+            script {
+                if (params.RELEASE) {
+                    def propertiesStr = ""
+                    for(entry in deployProperties) {
+                        propertiesStr = "${propertiesStr}${entry.key}=${entry.value}\n"
+                    }
+                    writeFile(text: propertiesStr, file: PROPERTIES_FILE)
+                    archiveArtifacts(artifacts: PROPERTIES_FILE)
+                }
+            }
             cleanWs()
         }
     }
