@@ -8,16 +8,18 @@ pipeline {
     }
     parameters {
         string(name: 'DISPLAY_NAME', defaultValue: '', description: 'Setup a specific build display name')
-        string(name: 'BUILD_BRANCH_NAME', defaultValue: 'master', description: 'Which branch to build ? Set if you are not on a multibranch pipeline.')
+        string(name: 'BUILD_BRANCH_NAME', defaultValue: 'master', description: 'Which branch to build? Set if you are not on a multibranch pipeline.')
         booleanParam(name: 'RELEASE', defaultValue: false, description: 'Is this build for a release?')
-        string(name: 'MAVEN_VERSION', defaultValue: '3.6.2', description: 'Only used if RELEASE.')
+        string(name: 'PROJECT_VERSION', defaultValue: '', description: 'Optional if not RELEASE. If RELEASE, cannot be empty.')
+        string(name: 'GIT_USER', defaultValue: "Jenkins CI", description: "Only used if RELEASE. Git user name to use for commit for updating project version.")
+        string(name: 'GIT_USER_EMAIL', defaultValue: "jenkins@rhba-jenkins.rhev-ci-vms.eng.rdu2.redhat.com", description: "Only used if RELEASE. Git user email to use for commit for updating project version.")
+        string(name: 'NEW_BRANCH_NAME', defaultValue: "", description: "Only used if RELEASE. Name for new branch to push commit to for release PR. If empty, will use PROJECT_VERSION as branch name.")
     }
     environment {
+        KOGITO_CI_EMAIL_TO = credentials("KOGITO_CI_EMAIL_TO")
+        PIPELINE_NAME = "Kogito Runtimes deploy pipeline"
         MAVEN_OPTS = '-Xms1024m -Xmx4g'
-        NEW_BRANCH = "${JOB_BASE_NAME}-${BUILD_NUMBER}"
-        GIT_USER = "Jenkins CI"
-        GIT_USER_EMAIL = "jenkins@rhba-jenkins.rhev-ci-vms.eng.rdu2.redhat.com"
-        COMMIT_MSG = "Update Maven version for release"
+        COMMIT_MSG = "Update project version to ${params.PROJECT_VERSION} for release"
         PROPERTIES_FILE = "deployment.properties"
     }
     tools {
@@ -40,6 +42,15 @@ pipeline {
                         // Switch to branch if not on a multibranch pipeline
                         env.BRANCH_NAME = params.BUILD_BRANCH_NAME
                     }
+                    deployProperties['release'] = params.RELEASE
+                    deployProperties['project-version'] = params.PROJECT_VERSION
+                    env.NEW_BRANCH = params.NEW_BRANCH_NAME
+                    if (params.RELEASE) {
+                        assert params.PROJECT_VERSION != ''
+                        if (env.NEW_BRANCH == "") {
+                            env.NEW_BRANCH = params.PROJECT_VERSION
+                        }
+                    }
                 }
             }
         }
@@ -55,10 +66,12 @@ pipeline {
                     checkout(githubscm.resolveRepository("kogito-examples", "kiegroup", env.BRANCH_NAME, false))
                 }
                 // Use a separate dir for persistence to not overwrite the test results
-                sh "cp -r kogito-examples kogito-examples-persistence"
+                dir("kogito-examples-persistence") {
+                    checkout(githubscm.resolveRepository("kogito-examples", "kiegroup", env.BRANCH_NAME, false))
+                }
             }
         }
-        stage('Prepare Maven settings'){
+        stage('Setup Maven release config'){
             when {
                 expression { return params.RELEASE }
             }
@@ -66,24 +79,31 @@ pipeline {
                 configFileProvider([configFile(fileId: '771ff52a-a8b4-40e6-9b22-d54c7314aa1e', targetLocation: 'maven-settings.xml', variable: 'MAVEN_SETTINGS_FILE')]){
                     sh "echo '-B -s ${MAVEN_SETTINGS_FILE}' | tee kogito-{runtimes,apps,examples,examples-persistence}/.mvn/maven.config"
                 }
+            }
+        }
+        stage('Update project version'){
+            when {
+                expression { return params.PROJECT_VERSION != '' }
+            }
+            steps {
                 dir("kogito-runtimes") {
                     script {
-                        maven.updateMavenVersion(params.MAVEN_VERSION)
+                        maven.updateMavenVersion(params.PROJECT_VERSION)
                     }
                 }
                 dir("kogito-apps") {
                     script {
-                        maven.updateMavenVersion(params.MAVEN_VERSION)
+                        maven.updateMavenVersion(params.PROJECT_VERSION)
                     }
                 }
                 dir("kogito-examples") {
                     script {
-                        maven.updateMavenVersion(params.MAVEN_VERSION)
+                        maven.updateMavenVersion(params.PROJECT_VERSION)
                     }
                 }
                 dir("kogito-examples-persistence") {
                     script {
-                        maven.updateMavenVersion(params.MAVEN_VERSION)
+                        maven.updateMavenVersion(params.PROJECT_VERSION)
                     }
                 }
             }
@@ -152,26 +172,26 @@ pipeline {
             steps {
                 dir("kogito-runtimes") {
                     script {
-                        githubscm.createBranch(NEW_BRANCH)
-                        githubscm.commitChanges(GIT_USER, GIT_USER_EMAIL, COMMIT_MSG, "pom.xml")
-                        githubscm.pushObject("origin", NEW_BRANCH)
-                        deployProperties["kogito-runtimes.pr"] = githubscm.createPR(COMMIT_MSG, "master")
+                        githubscm.createBranch(env.NEW_BRANCH)
+                        githubscm.commitChanges(params.GIT_USER, params.GIT_USER_EMAIL, env.COMMIT_MSG, "pom.xml")
+                        githubscm.pushObject("origin", env.NEW_BRANCH)
+                        deployProperties["kogito-runtimes.pr.link"] = githubscm.createPR(env.COMMIT_MSG, "master")
                     }
                 }
                 dir("kogito-apps") {
                     script {
-                        githubscm.createBranch(NEW_BRANCH)
-                        githubscm.commitChanges(GIT_USER, GIT_USER_EMAIL, COMMIT_MSG, "pom.xml")
-                        githubscm.pushObject("origin", NEW_BRANCH)
-                        deployProperties["kogito-apps.pr"] = githubscm.createPR(COMMIT_MSG, "master")
+                        githubscm.createBranch(env.NEW_BRANCH)
+                        githubscm.commitChanges(params.GIT_USER, params.GIT_USER_EMAIL, env.COMMIT_MSG, "pom.xml")
+                        githubscm.pushObject("origin", env.NEW_BRANCH)
+                        deployProperties["kogito-apps.pr.link"] = githubscm.createPR(env.COMMIT_MSG, "master")
                     }
                 }
                 dir("kogito-examples") {
                     script {
-                        githubscm.createBranch(NEW_BRANCH)
-                        githubscm.commitChanges(GIT_USER, GIT_USER_EMAIL, COMMIT_MSG, "pom.xml")
-                        githubscm.pushObject("origin", NEW_BRANCH)
-                        deployProperties["kogito-examples.pr"] = githubscm.createPR(COMMIT_MSG, "master")
+                        githubscm.createBranch(env.NEW_BRANCH)
+                        githubscm.commitChanges(params.GIT_USER, params.GIT_USER_EMAIL, env.COMMIT_MSG, "pom.xml")
+                        githubscm.pushObject("origin", env.NEW_BRANCH)
+                        deployProperties["kogito-examples.pr.link"] = githubscm.createPR(env.COMMIT_MSG, "master")
                     }
                 }
             }
@@ -201,6 +221,9 @@ pipeline {
             }
             steps {
                 script {
+                    emailext body: "${env.PIPELINE_NAME} #${env.BUILD_NUMBER} needs a staging repository URL: ${env.BUILD_URL}input",
+                             subject: "${env.PIPELINE_NAME} #${env.BRANCH_NAME}",
+                             to: env.KOGITO_CI_EMAIL_TO
                     deployProperties["staging-repo.url"] = input(message: "Enter staging repository URL:", parameters: [string(name: 'STAGING_REPO_URL')])
                 }
             }
@@ -209,14 +232,12 @@ pipeline {
     post {
         always {
             script {
-                if (params.RELEASE) {
-                    def propertiesStr = ""
-                    for(entry in deployProperties) {
-                        propertiesStr = "${propertiesStr}${entry.key}=${entry.value}\n"
-                    }
-                    writeFile(text: propertiesStr, file: PROPERTIES_FILE)
-                    archiveArtifacts(artifacts: PROPERTIES_FILE)
+                def propertiesStr = ""
+                for(entry in deployProperties) {
+                    propertiesStr = "${propertiesStr}${entry.key}=${entry.value}\n"
                 }
+                writeFile(text: propertiesStr, file: env.PROPERTIES_FILE)
+                archiveArtifacts(artifacts: env.PROPERTIES_FILE)
             }
             cleanWs()
         }
