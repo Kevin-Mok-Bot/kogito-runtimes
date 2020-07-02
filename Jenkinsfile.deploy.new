@@ -11,16 +11,16 @@ pipeline {
         string(name: 'BUILD_BRANCH_NAME', defaultValue: 'master', description: 'Which branch to build? Set if you are not on a multibranch pipeline.')
         booleanParam(name: 'RELEASE', defaultValue: false, description: 'Is this build for a release?')
         string(name: 'PROJECT_VERSION', defaultValue: '', description: 'Optional if not RELEASE. If RELEASE, cannot be empty.')
-        string(name: 'GIT_USER', defaultValue: "Jenkins CI", description: "Only used if RELEASE. Git user name to use for commit for updating project version.")
-        string(name: 'GIT_USER_EMAIL', defaultValue: "jenkins@rhba-jenkins.rhev-ci-vms.eng.rdu2.redhat.com", description: "Only used if RELEASE. Git user email to use for commit for updating project version.")
-        string(name: 'NEW_BRANCH_NAME', defaultValue: "", description: "Only used if RELEASE. Name for new branch to push commit to for release PR. If empty, will use PROJECT_VERSION as branch name.")
     }
     environment {
         KOGITO_CI_EMAIL_TO = credentials("KOGITO_CI_EMAIL_TO")
         PIPELINE_NAME = "Kogito Runtimes deploy pipeline"
         MAVEN_OPTS = '-Xms1024m -Xmx4g'
-        COMMIT_MSG = "Update project version to ${params.PROJECT_VERSION} for release"
         PROPERTIES_FILE = "deployment.properties"
+        FILES_TO_ADD = '**/pom.xml'
+        COMMIT_MSG = "Update project version to ${params.PROJECT_VERSION} for release"
+        // TODO: to be replaced with bot account used to create PR's
+        BOT_CREDENTIALS_ID = "kie-ci-bot"
     }
     tools {
         maven 'kie-maven-3.6.2'
@@ -42,14 +42,12 @@ pipeline {
                         // Switch to branch if not on a multibranch pipeline
                         env.BRANCH_NAME = params.BUILD_BRANCH_NAME
                     }
-                    deployProperties['release'] = params.RELEASE
-                    deployProperties['project-version'] = params.PROJECT_VERSION
-                    env.NEW_BRANCH = params.NEW_BRANCH_NAME
                     if (params.RELEASE) {
                         assert params.PROJECT_VERSION != ''
-                        if (env.NEW_BRANCH == "") {
-                            env.NEW_BRANCH = params.PROJECT_VERSION
-                        }
+                    }
+                    deployProperties['release'] = params.RELEASE
+                    if (params.PROJECT_VERSION != '') {
+                        deployProperties['project-version'] = params.PROJECT_VERSION
                     }
                 }
             }
@@ -172,25 +170,28 @@ pipeline {
             steps {
                 dir("kogito-runtimes") {
                     script {
-                        githubscm.createBranch(env.NEW_BRANCH)
-                        githubscm.commitChanges(params.GIT_USER, params.GIT_USER_EMAIL, env.COMMIT_MSG, "pom.xml")
-                        githubscm.pushObject("origin", env.NEW_BRANCH)
+                        githubscm.forkRepo(env.BOT_CREDENTIALS_ID)
+                        githubscm.createBranch(params.PROJECT_VERSION)
+                        githubscm.commitChanges(env.GIT_COMMITTER_NAME, env.GIT_COMMITTER_EMAIL, env.COMMIT_MSG, env.FILES_TO_ADD)
+                        githubscm.pushObject("origin", params.PROJECT_VERSION)
                         deployProperties["kogito-runtimes.pr.link"] = githubscm.createPR(env.COMMIT_MSG, "master")
                     }
                 }
                 dir("kogito-apps") {
                     script {
-                        githubscm.createBranch(env.NEW_BRANCH)
-                        githubscm.commitChanges(params.GIT_USER, params.GIT_USER_EMAIL, env.COMMIT_MSG, "pom.xml")
-                        githubscm.pushObject("origin", env.NEW_BRANCH)
+                        githubscm.forkRepo(env.BOT_CREDENTIALS_ID)
+                        githubscm.createBranch(params.PROJECT_VERSION)
+                        githubscm.commitChanges(env.GIT_COMMITTER_NAME, env.GIT_COMMITTER_EMAIL, env.COMMIT_MSG, env.FILES_TO_ADD)
+                        githubscm.pushObject("origin", params.PROJECT_VERSION)
                         deployProperties["kogito-apps.pr.link"] = githubscm.createPR(env.COMMIT_MSG, "master")
                     }
                 }
                 dir("kogito-examples") {
                     script {
-                        githubscm.createBranch(env.NEW_BRANCH)
-                        githubscm.commitChanges(params.GIT_USER, params.GIT_USER_EMAIL, env.COMMIT_MSG, "pom.xml")
-                        githubscm.pushObject("origin", env.NEW_BRANCH)
+                        githubscm.forkRepo(env.BOT_CREDENTIALS_ID)
+                        githubscm.createBranch(params.PROJECT_VERSION)
+                        githubscm.commitChanges(env.GIT_COMMITTER_NAME, env.GIT_COMMITTER_EMAIL, env.COMMIT_MSG, env.FILES_TO_ADD)
+                        githubscm.pushObject("origin", params.PROJECT_VERSION)
                         deployProperties["kogito-examples.pr.link"] = githubscm.createPR(env.COMMIT_MSG, "master")
                     }
                 }
@@ -215,14 +216,14 @@ pipeline {
                 }
             }
         }
-        stage('Archive staging repository URL') {
+        stage('Get staging repository URL') {
             when {
                 expression { return params.RELEASE }
             }
             steps {
                 script {
                     emailext body: "${env.PIPELINE_NAME} #${env.BUILD_NUMBER} needs a staging repository URL: ${env.BUILD_URL}input",
-                             subject: "${env.PIPELINE_NAME} #${env.BRANCH_NAME}",
+                             subject: "${env.PIPELINE_NAME} #${env.BUILD_BRANCH_NAME}",
                              to: env.KOGITO_CI_EMAIL_TO
                     deployProperties["staging-repo.url"] = input(message: "Enter staging repository URL:", parameters: [string(name: 'STAGING_REPO_URL')])
                 }
@@ -232,10 +233,7 @@ pipeline {
     post {
         always {
             script {
-                def propertiesStr = ""
-                for(entry in deployProperties) {
-                    propertiesStr = "${propertiesStr}${entry.key}=${entry.value}\n"
-                }
+                def propertiesStr = deployProperties.collect{ entry ->  "${entry.key}=${entry.value}" }.join("\n")
                 writeFile(text: propertiesStr, file: env.PROPERTIES_FILE)
                 archiveArtifacts(artifacts: env.PROPERTIES_FILE)
             }
