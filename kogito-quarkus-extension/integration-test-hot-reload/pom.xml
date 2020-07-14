@@ -7,7 +7,7 @@
     <parent>
         <groupId>org.kie.kogito</groupId>
         <artifactId>kogito-quarkus-parent</artifactId>
-        <version>7.14.1</version>
+        <version>7.14.2-SNAPSHOT</version>
     </parent>
 
     <artifactId>kogito-quarkus-integration-test-hot-reload</artifactId>
